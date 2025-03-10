@@ -2,7 +2,6 @@
 
 An engaging Flappy Bird-like game designed specifically for the ESP32-2432S028R "Cheap Yellow Display" (CYD) board. This game features smooth animations, responsive touch controls, and persistent high scores.
 
-![Flappy Kiernan Game](https://github.com/yourusername/flappy-kiernan/raw/main/images/game_screenshot.jpg)
 
 ## Overview
 
