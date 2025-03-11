@@ -1,8 +1,9 @@
 /*
  * Flappy Kiernan - A Flappy Bird-like game for ESP32-2432S028R (CYD)
  * Using LovyanGFX library for flicker-free rendering
- * This is a base test program on the CYD for my 9 year old
  * 
+ * This implementation uses hardware-accelerated sprite rendering and double buffering
+ * to provide a completely flicker-free gaming experience.
  * 
  * PART 1 - Main definitions, setup and game state
  */
@@ -140,8 +141,8 @@ struct Pipe {
   int x;
   int gapY;
   bool counted;
+  float speed; // New variable to store pipe-specific speed
 };
-
 // Player structure
 struct Player {
   float x;
@@ -214,6 +215,7 @@ void setup() {
       File f = SPIFFS.open("/highscore.dat", "r");
       if (f && f.size() >= sizeof(highScore)) {
         f.read((uint8_t*)&highScore, sizeof(highScore));
+        //resetHighScore();
         Serial.print("Loaded high score: ");
         Serial.println(highScore);
         f.close();
@@ -388,6 +390,24 @@ const uint16_t kiernan_sprite[] PROGMEM = {
 
 // ============= 2. GAME MECHANICS FUNCTIONS =============
 // Function to save high score to SPIFFS
+// Function to reset high score
+void resetHighScore() {
+  highScore = 0; // Reset the value in memory
+  
+  // Delete the highscore file from SPIFFS
+  if (SPIFFS.exists("/highscore.dat")) {
+    SPIFFS.remove("/highscore.dat");
+    Serial.println("High score file deleted!");
+  }
+  
+  // Create a new file with zero value
+  File f = SPIFFS.open("/highscore.dat", "w");
+  if (f) {
+    f.write((uint8_t*)&highScore, sizeof(highScore));
+    f.close();
+    Serial.println("High score reset to zero!");
+  }
+}
 void saveHighScore() {
   File f = SPIFFS.open("/highscore.dat", "w");
   if (f) {
@@ -432,6 +452,8 @@ void resetGame() {
       }
     }
     
+    // Initialize pipes with default speed
+    pipes[i].speed = PIPE_SPEED;
     pipes[i].counted = false;
   }
   
@@ -509,7 +531,7 @@ void handleTouch() {
   }
 }
 
-// Update game function - improved version with deltaTime scaling
+// Update game function - improved version with consistent difficulty progression
 void updateGame(float deltaTime) {
   // Scale calculations by deltaTime for consistent physics regardless of frame rate
   float scaledGravity = GRAVITY * deltaTime * 60.0; // Scale to target 60fps
@@ -537,13 +559,45 @@ void updateGame(float deltaTime) {
     Serial.println("Game Over: Hit ground");
   }
   
-  // Update pipes with frame-rate independent movement
-  float scaledPipeSpeed = PIPE_SPEED * deltaTime * 60.0;
+  // Calculate global difficulty parameters based on score
+  float globalSpeed;
+  int globalGapSize;
   
+  // Determine difficulty level based on score
+  if (score < 10) {
+    // Beginner level (0-9)
+    globalSpeed = PIPE_SPEED;
+    globalGapSize = PIPE_GAP;
+  } else if (score < 20) {
+    // Intermediate level (10-19)
+    globalSpeed = PIPE_SPEED * 1.1f;
+    globalGapSize = PIPE_GAP - 5;
+  } else if (score < 30) {
+    // Advanced level (20-29)
+    globalSpeed = PIPE_SPEED * 1.2f;
+    globalGapSize = PIPE_GAP - 12;
+  } else {
+    // Expert level (30+)
+    globalSpeed = PIPE_SPEED * 1.25f;
+    globalGapSize = max(PIPE_GAP - 18, 70); // More forgiving minimum gap
+  }
+  
+  // Apply global speed to all pipes for consistency
+  // Only update speeds that have significantly changed to avoid disruption
+  static float lastAppliedSpeed = 0;
+  if (abs(lastAppliedSpeed - globalSpeed) > 0.05) {
+    for (int i = 0; i < MAX_PIPES; i++) {
+      pipes[i].speed = globalSpeed;
+    }
+    lastAppliedSpeed = globalSpeed;
+  }
+  
+  // Update pipes with frame-rate independent movement
   for (int i = 0; i < MAX_PIPES; i++) {
-    pipes[i].x -= scaledPipeSpeed;
+    // Move the pipe using its own speed
+    pipes[i].x -= pipes[i].speed * deltaTime * 60.0;
     
-    // Reset pipe when it moves off screen
+    // When a pipe moves off screen and is being reset
     if (pipes[i].x < -PIPE_WIDTH) {
       // Find the rightmost pipe
       int rightmostX = 0;
@@ -557,22 +611,18 @@ void updateGame(float deltaTime) {
       pipes[i].x = rightmostX + SCREEN_WIDTH / 2;
       
       // Create challenging but fair gap positions
-      int minGapPos = PIPE_GAP;
-      int maxGapPos = SCREEN_HEIGHT - PIPE_GAP - GROUND_HEIGHT;
+      // Ensure there's always enough room for the gap placement
+      int minGapPos = max(20, globalGapSize/2); // Minimum allowed gap position from top
+      int maxGapPos = SCREEN_HEIGHT - globalGapSize - GROUND_HEIGHT - 20; // Buffer from bottom
       
-      // As score increases, make the game slightly more challenging
-      if (score > 10) {
-        // Gradually decrease minimum gap size based on score, but maintain a minimum
-        int adjustedGap = max(PIPE_GAP - (score / 10) * 5, 70);
-        pipes[i].gapY = random(minGapPos, maxGapPos);
-      } else {
-        pipes[i].gapY = random(minGapPos, maxGapPos);
-      }
+      // Generate new gap Y position
+      pipes[i].gapY = random(minGapPos, maxGapPos);
       
       // Ensure consecutive pipes don't have drastically different gap heights
-      // Find the previous pipe (the one that's now the second-rightmost)
       int prevPipeIndex = -1;
       int secondRightmostX = 0;
+      
+      // Find the previous pipe (the one that's now the second-rightmost)
       for (int j = 0; j < MAX_PIPES; j++) {
         if (j != i && pipes[j].x > secondRightmostX && pipes[j].x < rightmostX) {
           secondRightmostX = pipes[j].x;
@@ -583,7 +633,7 @@ void updateGame(float deltaTime) {
       // If we found a previous pipe, ensure the gap isn't too different
       if (prevPipeIndex != -1) {
         int prevGapY = pipes[prevPipeIndex].gapY;
-        int maxDifference = PIPE_GAP / 2;
+        int maxDifference = globalGapSize / 2; // Scale maximum difference with gap size
         
         if (abs(pipes[i].gapY - prevGapY) > maxDifference) {
           // If difference is too large, bring it closer to previous gap
@@ -595,6 +645,7 @@ void updateGame(float deltaTime) {
         }
       }
       
+      // Reset counted flag for the new pipe
       pipes[i].counted = false;
     }
     
@@ -609,17 +660,22 @@ void updateGame(float deltaTime) {
       }
       Serial.print("Score: ");
       Serial.println(score);
+      
+      // Debug to make sure we're continuing after high score
+      if (score >= highScore) {
+        Serial.println("New high score reached! Game continuing...");
+      }
     }
     
-    // Improved collision detection with more precise hitboxes
+    // Improved collision detection with more precise hitboxes and level-appropriate gap size
     // Create a slightly smaller hitbox for player to make the game feel more fair
     float playerHitboxX = player.x + 5;
     float playerHitboxY = player.y + 3; 
     float playerHitboxWidth = PLAYER_WIDTH - 10;
     float playerHitboxHeight = PLAYER_HEIGHT - 6;
     
-    // Check collision with pipe
-    bool inPipeHeight = playerHitboxY < pipes[i].gapY || playerHitboxY + playerHitboxHeight > pipes[i].gapY + PIPE_GAP;
+    // Check collision with pipe - use global gap size for consistent collision detection
+    bool inPipeHeight = playerHitboxY < pipes[i].gapY || playerHitboxY + playerHitboxHeight > pipes[i].gapY + globalGapSize;
     bool inPipeWidth = playerHitboxX + playerHitboxWidth > pipes[i].x && playerHitboxX < pipes[i].x + PIPE_WIDTH;
     
     if (inPipeWidth && inPipeHeight) {
@@ -779,7 +835,7 @@ void renderCountdown() {
   // screenSprite.print("Tap to skip");
 }
 
-// Render game function - optimized version with better visuals
+/// Render game function - optimized version with better visuals
 void renderGame() {
   // Draw clouds in the background
   uint16_t cloudColor = screenSprite.color565(240, 240, 255);
@@ -826,6 +882,41 @@ void renderGame() {
   screenSprite.setCursor(10, 10);
   screenSprite.print("Score: ");
   screenSprite.print(score);
+  
+  // Add a difficulty indicator based on score - with more visible styling
+  // Create a small level indicator background
+  uint16_t levelBgColor;
+  const char* levelText;
+  
+  if (score < 10) {
+    levelBgColor = TFT_GREEN; // Easy level color
+    levelText = "LEVEL: 1";
+  } else if (score < 20) {
+    levelBgColor = TFT_YELLOW; // Medium level color
+    levelText = "LEVEL: 2";
+  } else if (score < 30) {
+    levelBgColor = TFT_ORANGE; // Hard level color
+    levelText = "LEVEL: 3";
+  } else {
+    levelBgColor = TFT_RED; // Expert level color
+    levelText = "LEVEL: MAX";
+  }
+  
+  // Draw level indicator with background
+  int levelX = SCREEN_WIDTH - 85;
+  int levelY = 8;
+  int levelWidth = 75;
+  int levelHeight = 15;
+  
+  // Background box
+  screenSprite.fillRoundRect(levelX, levelY, levelWidth, levelHeight, 4, levelBgColor);
+  screenSprite.drawRoundRect(levelX, levelY, levelWidth, levelHeight, 4, TFT_WHITE);
+  
+  // Text
+  screenSprite.setTextSize(1);
+  screenSprite.setTextColor(TFT_BLACK);
+  screenSprite.setCursor(levelX + 5, levelY + 4);
+  screenSprite.print(levelText);
 }
 
 // Render game over function - improved version with better visuals
